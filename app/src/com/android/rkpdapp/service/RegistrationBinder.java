@@ -20,6 +20,8 @@ import android.content.Context;
 import android.os.RemoteException;
 import android.util.Log;
 
+import androidx.annotation.GuardedBy;
+
 import com.android.rkpdapp.GeekResponse;
 import com.android.rkpdapp.IGetKeyCallback;
 import com.android.rkpdapp.IRegistration;
@@ -31,10 +33,14 @@ import com.android.rkpdapp.database.ProvisionedKey;
 import com.android.rkpdapp.database.ProvisionedKeyDao;
 import com.android.rkpdapp.interfaces.ServerInterface;
 import com.android.rkpdapp.provisioner.Provisioner;
+import com.android.rkpdapp.utils.Settings;
 
-import java.util.concurrent.ConcurrentHashMap;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import co.nstant.in.cbor.CborException;
@@ -44,6 +50,10 @@ import co.nstant.in.cbor.CborException;
  * IRemotelyProvisionedComponent) tuple.
  */
 public final class RegistrationBinder extends IRegistration.Stub {
+    // The minimum amount of time that the registration will consider a key valid. If a key expires
+    // before this time elapses, then the key is considered too stale and will not be used.
+    public static final Duration MIN_KEY_LIFETIME = Duration.ofHours(1);
+
     static final String TAG = "RkpdRegistrationBinder";
 
     private final Context mContext;
@@ -52,36 +62,42 @@ public final class RegistrationBinder extends IRegistration.Stub {
     private final ProvisionedKeyDao mProvisionedKeyDao;
     private final ServerInterface mRkpServer;
     private final Provisioner mProvisioner;
-    private final ExecutorService mThreadPool = Executors.newCachedThreadPool();
-    private final ConcurrentHashMap<IGetKeyCallback, TaskHolder> mTasks =
-            new ConcurrentHashMap<>();
-
-    private static final class TaskHolder {
-        public Future<?> task;
-    }
+    private final ExecutorService mThreadPool;
+    private final Object mTasksLock = new Object();
+    @GuardedBy("mTasksLock")
+    private final HashMap<IGetKeyCallback, Future<?>> mTasks = new HashMap<>();
 
     public RegistrationBinder(Context context, int clientUid, String irpcName,
             ProvisionedKeyDao provisionedKeyDao, ServerInterface rkpServer,
-            Provisioner provisioner) {
+            Provisioner provisioner, ExecutorService threadPool) {
         mContext = context;
         mClientUid = clientUid;
         mServiceName = irpcName;
         mProvisionedKeyDao = provisionedKeyDao;
         mRkpServer = rkpServer;
         mProvisioner = provisioner;
+        mThreadPool = threadPool;
     }
 
     private void getKeyWorker(int keyId, IGetKeyCallback callback)
-            throws CborException, InterruptedException, RkpdException, RemoteException {
+            throws CborException, InterruptedException, RkpdException {
         Log.i(TAG, "Key requested for service: " + mServiceName + ", clientUid: " + mClientUid
                 + ", keyId: " + keyId + ", callback: " + callback.hashCode());
+        // Use reduced look-ahead to get rid of soon-to-be expired keys, because the periodic
+        // provisioner should be ensuring that old keys are already expired. However, in the
+        // edge case that periodic provisioning didn't work, we want to allow slightly "more stale"
+        // keys to be used. This reduces window of time in which key attestation is not available
+        // (e.g. if there is a provisioning server outage). Note that we must have some look-ahead,
+        // rather than using "now", else we might return a key that expires so soon that the caller
+        // can never successfully use it.
+        final Instant minExpiry = Instant.now().plus(MIN_KEY_LIFETIME);
+        mProvisionedKeyDao.deleteExpiringKeys(minExpiry);
+
         ProvisionedKey assignedKey = mProvisionedKeyDao.getKeyForClientAndIrpc(
                 mServiceName, mClientUid, keyId);
 
         if (assignedKey == null) {
-            Log.i(TAG, "No key assigned, looking for an available key");
-            assignedKey = mProvisionedKeyDao.assignKey(mServiceName, mClientUid, keyId);
-            // TODO(b/262253838): check to see if we should kick off provisioning in the background
+            assignedKey = tryToAssignKey(minExpiry, keyId);
         }
 
         if (assignedKey == null) {
@@ -97,7 +113,7 @@ public final class RegistrationBinder extends IRegistration.Stub {
                 GeekResponse geekResponse = mRkpServer.fetchGeek(metrics);
                 mProvisioner.provisionKeys(metrics, mServiceName, geekResponse);
             }
-            assignedKey = mProvisionedKeyDao.assignKey(mServiceName, mClientUid, keyId);
+            assignedKey = tryToAssignKey(minExpiry, keyId);
         }
 
         // Now that we've gotten back from our network round-trip, it's possible an interrupt came
@@ -108,13 +124,55 @@ public final class RegistrationBinder extends IRegistration.Stub {
         if (assignedKey == null) {
             // This should never happen...
             Log.e(TAG, "Unable to provision keys");
-            checkedCallback(() -> callback.onError("Provisioning failed, no keys available"));
+            checkedCallback(() -> callback.onError(IGetKeyCallback.Error.ERROR_UNKNOWN,
+                    "Provisioning failed, no keys available"));
         } else {
             Log.i(TAG, "Key successfully assigned to client");
             RemotelyProvisionedKey key = new RemotelyProvisionedKey();
             key.keyBlob = assignedKey.keyBlob;
             key.encodedCertChain = assignedKey.certificateChain;
             checkedCallback(() -> callback.onSuccess(key));
+        }
+    }
+
+    private ProvisionedKey tryToAssignKey(Instant minExpiry, int keyId) {
+        // Since we're going to be assigning a fresh key to the app, we ideally want a key that's
+        // longer-lived than the minimum. We use the server-configured expiration, which is normally
+        // days, as the preferred lifetime for a key. However, if we cannot find a key that is valid
+        // for that long, we'll settle for a shorter-lived key.
+        Instant[] expirations = new Instant[] {
+                Instant.now().plus(Settings.getExpiringBy(mContext)),
+                minExpiry
+        };
+        Arrays.sort(expirations, Collections.reverseOrder());
+        for (Instant expiry : expirations) {
+            Log.i(TAG, "No key assigned, looking for an available key with expiry of " + expiry);
+            ProvisionedKey key = mProvisionedKeyDao.getOrAssignKey(mServiceName, expiry, mClientUid,
+                    keyId);
+            if (key != null) {
+                provisionKeysOnKeyConsumed();
+                return key;
+            }
+        }
+        return null;
+    }
+
+    private void provisionKeysOnKeyConsumed() {
+        try (ProvisionerMetrics metrics = ProvisionerMetrics.createKeyConsumedAttemptMetrics(
+                mContext, mServiceName)) {
+            if (!mProvisioner.isProvisioningNeeded(metrics, mServiceName)) {
+                metrics.setStatus(ProvisionerMetrics.Status.NO_PROVISIONING_NEEDED);
+                return;
+            }
+
+            mThreadPool.execute(() -> {
+                try {
+                    GeekResponse geekResponse = mRkpServer.fetchGeekAndUpdate(metrics);
+                    mProvisioner.provisionKeys(metrics, mServiceName, geekResponse);
+                } catch (CborException | RkpdException | InterruptedException e) {
+                    Log.e(TAG, "Error provisioning keys", e);
+                }
+            });
         }
     }
 
@@ -139,44 +197,71 @@ public final class RegistrationBinder extends IRegistration.Stub {
 
     @Override
     public void getKey(int keyId, IGetKeyCallback callback) {
-        TaskHolder newTask = new TaskHolder();
-        TaskHolder existingTask = mTasks.putIfAbsent(callback, newTask);
-        if (existingTask != null) {
-            throw new IllegalArgumentException("Callback " + callback.hashCode()
-                    + " is already associated with a getKey operation that is in-progress");
-        }
-
-        newTask.task = mThreadPool.submit(() -> {
-            try {
-                getKeyWorker(keyId, callback);
-            } catch (InterruptedException e) {
-                Log.i(TAG, "getKey was interrupted");
-                checkedCallback(callback::onCancel);
-            } catch (Exception e) {
-                // Do our best to inform the callback when even the unexpected happens. Otherwise,
-                // the caller is going to wait until they timeout without knowing something like a
-                // RuntimeException occurred.
-                Log.e(TAG, "Error provisioning keys", e);
-                checkedCallback(() -> callback.onError(e.getMessage()));
-            } finally {
-                mTasks.remove(callback);
+        synchronized (mTasksLock) {
+            if (mTasks.containsKey(callback)) {
+                throw new IllegalArgumentException("Callback " + callback.hashCode()
+                        + " is already associated with a getKey operation that is in-progress");
             }
-        });
+
+            mTasks.put(callback, mThreadPool.submit(() -> {
+                try {
+                    getKeyWorker(keyId, callback);
+                } catch (InterruptedException e) {
+                    Log.i(TAG, "getKey was interrupted");
+                    checkedCallback(callback::onCancel);
+                } catch (RkpdException e) {
+                    Log.e(TAG, "RKPD failed to provision keys", e);
+                    checkedCallback(() -> callback.onError(mapToGetKeyError(e), e.getMessage()));
+                } catch (Exception e) {
+                    // Do our best to inform the callback when the unexpected happens. Otherwise,
+                    // the caller is going to wait until they timeout without knowing something like
+                    // a RuntimeException occurred.
+                    Log.e(TAG, "Unexpected error provisioning keys", e);
+                    checkedCallback(() -> callback.onError(IGetKeyCallback.Error.ERROR_UNKNOWN,
+                            e.getMessage()));
+                } finally {
+                    synchronized (mTasksLock) {
+                        mTasks.remove(callback);
+                    }
+                }
+            }));
+        }
+    }
+
+    /** Maps an RkpdException into an IGetKeyCallback.Error value. */
+    private byte mapToGetKeyError(RkpdException e) {
+        switch (e.getErrorCode()) {
+            case NO_NETWORK_CONNECTIVITY:
+                return IGetKeyCallback.Error.ERROR_PENDING_INTERNET_CONNECTIVITY;
+
+            case DEVICE_NOT_REGISTERED:
+                return IGetKeyCallback.Error.ERROR_PERMANENT;
+
+            case NETWORK_COMMUNICATION_ERROR:
+            case HTTP_CLIENT_ERROR:
+            case HTTP_SERVER_ERROR:
+            case HTTP_UNKNOWN_ERROR:
+            case INTERNAL_ERROR:
+            default:
+                return IGetKeyCallback.Error.ERROR_UNKNOWN;
+        }
     }
 
     @Override
     public void cancelGetKey(IGetKeyCallback callback) throws RemoteException {
         Log.i(TAG, "cancelGetKey(" + callback.hashCode() + ")");
-        TaskHolder holder = mTasks.get(callback);
+        synchronized (mTasksLock) {
+            Future<?> task = mTasks.get(callback);
 
-        if (holder == null) {
-            Log.w(TAG, "callback not found, task may have already completed");
-        } else if (holder.task.isDone()) {
-            Log.w(TAG, "task already completed, not cancelling");
-        } else if (holder.task.isCancelled()) {
-            Log.w(TAG, "task already cancelled, cannot cancel it any further");
-        } else {
-            holder.task.cancel(true);
+            if (task == null) {
+                Log.w(TAG, "callback not found, task may have already completed");
+            } else if (task.isDone()) {
+                Log.w(TAG, "task already completed, not cancelling");
+            } else if (task.isCancelled()) {
+                Log.w(TAG, "task already cancelled, cannot cancel it any further");
+            } else {
+                task.cancel(true);
+            }
         }
     }
 

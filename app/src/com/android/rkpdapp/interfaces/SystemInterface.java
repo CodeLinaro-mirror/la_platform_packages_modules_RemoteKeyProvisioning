@@ -69,14 +69,17 @@ public class SystemInterface {
         try (ProvisionerMetrics.StopWatch ignored = metrics.startBinderWait()) {
             byte[] privKey = mBinder.generateEcdsaP256KeyPair(false, macedPublicKey);
             return CborUtils.extractRkpKeyFromMacedKey(privKey, mServiceName, macedPublicKey);
-        } catch (RemoteException ex) {
+        } catch (RemoteException e) {
             metrics.setStatus(ProvisionerMetrics.Status.GENERATE_KEYPAIR_FAILED);
-            Log.e(TAG, "Failed to generate key.", ex);
-            throw ex.rethrowAsRuntimeException();
-        } catch (ServiceSpecificException ex) {
+            Log.e(TAG, "Failed to generate key.", e);
+            throw e.rethrowAsRuntimeException();
+        } catch (ServiceSpecificException e) {
             metrics.setStatus(ProvisionerMetrics.Status.GENERATE_KEYPAIR_FAILED);
-            Log.e(TAG, "Failed to generate key. Failed with " + ex.errorCode, ex);
-            throw ex;
+            Log.e(TAG, "Failed to generate key. Failed with " + e.errorCode, e);
+            throw e;
+        } catch (CborException e) {
+            metrics.setStatus(ProvisionerMetrics.Status.GENERATE_KEYPAIR_FAILED);
+            throw e;
         }
     }
 
@@ -98,8 +101,7 @@ public class SystemInterface {
                     return key;
                 }).toArray(MacedPublicKey[]::new);
         try (ProvisionerMetrics.StopWatch ignored = metrics.startBinderWait()) {
-            // TODO: Change this back to version 3 once RKP server starts handling CSR v2.
-            if (mBinder.getInterfaceVersion() < 4) {
+            if (getVersion() < 3) {
                 DeviceInfo deviceInfo = new DeviceInfo();
                 ProtectedData protectedData = new ProtectedData();
                 byte[] geekChain = geekResponse.getGeekChain(mSupportedCurve);
@@ -141,6 +143,9 @@ public class SystemInterface {
             metrics.setStatus(ProvisionerMetrics.Status.GENERATE_CSR_FAILED);
             Log.e(TAG, "Failed to generate CSR blob. Failed with " + ex.errorCode, ex);
             throw ex;
+        } catch (CborException e) {
+            metrics.setStatus(ProvisionerMetrics.Status.GENERATE_CSR_FAILED);
+            throw e;
         }
     }
 
@@ -148,6 +153,6 @@ public class SystemInterface {
      * Gets the implemented version for IRemotelyProvisionedComponent.
      */
     public int getVersion() throws RemoteException {
-        return mBinder.getInterfaceVersion();
+        return mBinder.getHardwareInfo().versionNumber;
     }
 }
