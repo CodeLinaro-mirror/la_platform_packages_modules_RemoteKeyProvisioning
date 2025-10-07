@@ -24,9 +24,12 @@ import android.net.Uri;
 import android.os.SystemProperties;
 import android.util.Base64;
 import android.util.Log;
-
 import androidx.annotation.VisibleForTesting;
-
+import co.nstant.in.cbor.CborException;
+import co.nstant.in.cbor.model.MajorType;
+import com.android.rkpd.flags.Flags;
+import com.android.rkpdapp.ConfirmCertificates;
+import com.android.rkpdapp.ConfirmCertificates.PayloadType;
 import com.android.rkpdapp.GeekResponse;
 import com.android.rkpdapp.RkpdException;
 import com.android.rkpdapp.metrics.ProvisioningAttempt;
@@ -35,7 +38,6 @@ import com.android.rkpdapp.utils.NetworkUtils;
 import com.android.rkpdapp.utils.Settings;
 import com.android.rkpdapp.utils.StopWatch;
 import com.android.rkpdapp.utils.X509Utils;
-
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -52,7 +54,9 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -66,16 +70,20 @@ public class ServerInterface {
     private static final int BACKOFF_TIME_MS = 100;
 
     private static final String TAG = "RkpdServerInterface";
-    private static final String GEEK_URL = ":fetchEekChain";
-    private static final String CERTIFICATE_SIGNING_URL = ":signCertificates";
     private static final String REQUEST_ID_PARAMETER = "request_id";
+    private static final Map<Operation, String> URL_PATHS =
+            Map.of(
+                    Operation.FETCH_GEEK, ":fetchEekChain",
+                    Operation.SIGN_CERTS, ":signCertificates",
+                    Operation.CONFIRM_CERTIFICATES, ":confirmCertificates");
 
     private final Context mContext;
     private final boolean mIsAsync;
 
     private enum Operation {
         FETCH_GEEK(1),
-        SIGN_CERTS(2);
+        SIGN_CERTS(2),
+        CONFIRM_CERTIFICATES(3);
 
         private final int mTrafficTag;
 
@@ -92,6 +100,8 @@ public class ServerInterface {
                 return ProvisioningAttempt.Status.FETCH_GEEK_HTTP_ERROR;
             } else if (Objects.equals(name(), SIGN_CERTS.name())) {
                 return ProvisioningAttempt.Status.SIGN_CERTS_HTTP_ERROR;
+            } else if (Objects.equals(name(), CONFIRM_CERTIFICATES.name())) {
+                return ProvisioningAttempt.Status.CONFIRM_CERTIFICATES_HTTP_ERROR;
             }
             throw new IllegalStateException("Please declare status for new operation.");
         }
@@ -101,6 +111,8 @@ public class ServerInterface {
                 return ProvisioningAttempt.Status.FETCH_GEEK_IO_EXCEPTION;
             } else if (Objects.equals(name(), SIGN_CERTS.name())) {
                 return ProvisioningAttempt.Status.SIGN_CERTS_IO_EXCEPTION;
+            } else if (Objects.equals(name(), CONFIRM_CERTIFICATES.name())) {
+                return ProvisioningAttempt.Status.CONFIRM_CERTIFICATES_IO_EXCEPTION;
             }
             throw new IllegalStateException("Please declare status for new operation.");
         }
@@ -110,6 +122,8 @@ public class ServerInterface {
                 return ProvisioningAttempt.Status.FETCH_GEEK_TIMED_OUT;
             } else if (Objects.equals(name(), SIGN_CERTS.name())) {
                 return ProvisioningAttempt.Status.SIGN_CERTS_TIMED_OUT;
+            } else if (Objects.equals(name(), CONFIRM_CERTIFICATES.name())) {
+                return ProvisioningAttempt.Status.CONFIRM_CERTIFICATES_TIMED_OUT;
             }
             throw new IllegalStateException("Please declare status for new operation.");
         }
@@ -158,6 +172,56 @@ public class ServerInterface {
         return SYNC_CONNECT_TIMEOUT_OPEN_MS;
     }
 
+    public void confirmCertificates(
+            ConfirmCertificates confirmCertificates, String requestId, ProvisioningAttempt metrics)
+            throws RkpdException, InterruptedException {
+        if (!Flags.enableFeedbackLoop()) {
+            return;
+        }
+
+        byte[] cborBytes;
+        try {
+            cborBytes = confirmCertificates.buildConfirmCertificatesInfo();
+        } catch (CborException e) {
+            Log.e(
+                    TAG,
+                    "Failed to build ConfirmCertificatesInfo to be sent to the server. Skipping"
+                        + " feedback loop and resetting to defaults.",
+                    e);
+            Settings.resetDefaultConfig(mContext);
+            return;
+        }
+
+        final byte[] response =
+                connectAndGetData(
+                        metrics,
+                        generateUrl(Operation.CONFIRM_CERTIFICATES, requestId),
+                        cborBytes,
+                        Operation.CONFIRM_CERTIFICATES);
+
+        try {
+            // We don't really evaluate the response for now, but do expect it to be an array.
+            var unused =
+                    CborUtils.decodeCbor(response, "ConfirmCertificatesResponse", MajorType.ARRAY);
+        } catch (CborException e) {
+            Log.e(
+                    TAG,
+                    "Failed to parse ConfirmCertificates response from the server. Resetting to"
+                            + " defaults.",
+                    e);
+            Settings.resetDefaultConfig(mContext);
+            return;
+        }
+
+        // Reset the device config if we successfully sent an error instance to the server.
+        // Important to do this after confirmCertificates is called so that the appropriate server
+        // instance receives the request.
+        if (confirmCertificates.isErrorInstance()) {
+            Log.i(TAG, "ConfirmCertificates is an error instance. Resetting to defaults.");
+            Settings.resetDefaultConfig(mContext);
+        }
+    }
+
     /**
      * Ferries the CBOR blobs returned by KeyMint to the provisioning server. The data sent to the
      * provisioning server contains the MAC'ed CSRs and encrypted bundle containing the MAC key and
@@ -170,14 +234,35 @@ public class ServerInterface {
      */
     public List<byte[]> requestSignedCertificates(byte[] csr, ProvisioningAttempt metrics)
             throws RkpdException, InterruptedException {
+        return requestSignedCertificates(csr, metrics, Optional.empty(), Optional.empty());
+    }
+
+    public List<byte[]> requestSignedCertificates(
+            byte[] csr, ProvisioningAttempt metrics, String requestId)
+            throws RkpdException, InterruptedException {
+        return requestSignedCertificates(csr, metrics, Optional.of(requestId), Optional.empty());
+    }
+
+    public List<byte[]> requestSignedCertificates(
+            byte[] csr,
+            ProvisioningAttempt metrics,
+            Optional<String> requestId,
+            Optional<SystemInterface> systemInterface)
+            throws RkpdException, InterruptedException {
+        String reqId = requestId.orElseGet(() -> UUID.randomUUID().toString());
+        Log.i(TAG, "request_id: " + reqId);
+
         final byte[] cborBytes =
-                connectAndGetData(metrics, generateSignCertsUrl(), csr, Operation.SIGN_CERTS);
+                connectAndGetData(
+                        metrics,
+                        generateUrl(Operation.SIGN_CERTS, reqId),
+                        csr,
+                        Operation.SIGN_CERTS);
         List<byte[]> certChains = CborUtils.parseSignedCertificates(cborBytes);
         if (certChains == null) {
             metrics.setStatus(ProvisioningAttempt.Status.INTERNAL_ERROR);
             throw new RkpdException(
-                    RkpdException.ErrorCode.INTERNAL_ERROR,
-                    "Response failed to parse.");
+                    RkpdException.ErrorCode.INTERNAL_ERROR, "Response failed to parse.");
         } else if (certChains.isEmpty()) {
             metrics.setCertChainLength(0);
             metrics.setRootCertFingerprint("");
@@ -189,33 +274,22 @@ public class ServerInterface {
                 byte[] pubKeyDigest = MessageDigest.getInstance("SHA-256").digest(pubKey);
                 metrics.setRootCertFingerprint(Base64.encodeToString(pubKeyDigest, Base64.DEFAULT));
             } catch (NoSuchAlgorithmException e) {
-                throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
-                        "Algorithm not found", e);
+                throw new RkpdException(
+                        RkpdException.ErrorCode.INTERNAL_ERROR, "Algorithm not found", e);
+            } catch (RkpdException e) {
+                if (Flags.enableFeedbackLoop()) {
+                    ConfirmCertificates confirmCertificates =
+                            ConfirmCertificates.createErrorInstance(
+                                    systemInterface.get().getHalInstanceName(),
+                                    e.getMessage(),
+                                    certChains.get(0),
+                                    PayloadType.DER_CERTIFICATE_CHAIN);
+                    confirmCertificates(confirmCertificates, reqId, metrics);
+                }
+                throw e;
             }
         }
         return certChains;
-    }
-
-    private URL generateSignCertsUrl() throws RkpdException {
-        try {
-            return new URL(
-                    Uri.parse(Settings.getUrl(mContext))
-                            .buildUpon()
-                            .appendEncodedPath(CERTIFICATE_SIGNING_URL)
-                            .appendQueryParameter(REQUEST_ID_PARAMETER, generateAndLogRequestId())
-                            .build()
-                            .toString()
-                            // Needed due to the `:` in the URL endpoint.
-                            .replaceFirst("%3A", ":"));
-        } catch (MalformedURLException e) {
-            throw new RkpdException(RkpdException.ErrorCode.HTTP_CLIENT_ERROR, "Bad URL", e);
-        }
-    }
-
-    private String generateAndLogRequestId() {
-        String reqId = UUID.randomUUID().toString();
-        Log.i(TAG, "request_id: " + reqId);
-        return reqId;
     }
 
     /**
@@ -241,10 +315,21 @@ public class ServerInterface {
             throw new RkpdException(RkpdException.ErrorCode.NETWORK_COMMUNICATION_ERROR,
                     "Network communication consent not provided. Need to enable GMSCore app.");
         }
+
+        String requestId = UUID.randomUUID().toString();
+        Log.i(TAG, "request_id: " + requestId);
+
         byte[] input = CborUtils.buildProvisioningInfo(mContext);
         byte[] cborBytes =
-                connectAndGetData(metrics, generateFetchGeekUrl(), input, Operation.FETCH_GEEK);
-        GeekResponse resp = CborUtils.parseGeekResponse(cborBytes);
+                connectAndGetData(
+                        metrics,
+                        generateUrl(Operation.FETCH_GEEK, requestId),
+                        input,
+                        Operation.FETCH_GEEK);
+        GeekResponse resp = GeekResponse.parse(cborBytes);
+        if (Flags.enableRequestIdReuse()) {
+            resp.setRequestId(requestId);
+        }
         if (resp == null) {
             metrics.setStatus(ProvisioningAttempt.Status.FETCH_GEEK_HTTP_ERROR);
             throw new RkpdException(
@@ -254,16 +339,27 @@ public class ServerInterface {
         return resp;
     }
 
-    private URL generateFetchGeekUrl() throws RkpdException {
+    private URL generateUrl(Operation operation, String requestId) throws RkpdException {
+        Uri.Builder uriBuilder =
+                Uri.parse(Settings.getUrl(mContext))
+                        .buildUpon()
+                        // appendEncodedPath appends an already encoded path segment to the URI's
+                        // path. It performs no further encoding on the input string. This is the
+                        // correct method to use (instead of appendPath) since we do not want the
+                        // special character `:` to be percent-encoded.
+                        .appendEncodedPath(URL_PATHS.get(operation));
+        if (operation != Operation.FETCH_GEEK || Flags.enableRequestIdReuse()) {
+            uriBuilder.appendQueryParameter(REQUEST_ID_PARAMETER, requestId);
+        }
         try {
-            return new URL(Uri.parse(Settings.getUrl(mContext)).buildUpon()
-                            .appendPath(GEEK_URL)
+            return new URL(
+                    uriBuilder
                             .build()
                             .toString()
-                            // Needed due to the `:` in the URL endpoint.
+                            // Not really needed, but just in case.
                             .replaceFirst("%3A", ":"));
         } catch (MalformedURLException e) {
-            throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR, "Bad URL", e);
+            throw new RkpdException(RkpdException.ErrorCode.HTTP_CLIENT_ERROR, "Bad URL", e);
         }
     }
 

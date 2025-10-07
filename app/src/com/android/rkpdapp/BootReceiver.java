@@ -19,6 +19,8 @@ package com.android.rkpdapp;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.UserManager;
 import android.util.Log;
 
 import androidx.work.Constraints;
@@ -45,16 +47,27 @@ public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         Log.i(TAG, "Caught boot intent, waking up.");
+        UserManager userManager = context.getSystemService(UserManager.class);
+        if (userManager != null && !userManager.isSystemUser()) {
+            Log.i(TAG, "Caught boot intent on non-system user, disabling the application and going"
+                    + " back to sleep.");
+            context.getPackageManager().setApplicationEnabledSetting(
+                    context.getPackageName(),
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                    0);
+            return;
+        }
         Settings.generateAndSetId(context);
 
-        Constraints constraints = new Constraints.Builder()
+        Constraints rkpConstraints = new Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .setRequiresBatteryNotLow(true)
+                .setRequiresCharging(true)
                 .build();
 
         PeriodicWorkRequest workRequest =
                 new PeriodicWorkRequest.Builder(PeriodicProvisioner.class, 1, TimeUnit.DAYS)
-                        .setConstraints(constraints)
+                        .setConstraints(rkpConstraints)
                         .build();
         WorkManager
                 .getInstance(context)
@@ -62,10 +75,15 @@ public class BootReceiver extends BroadcastReceiver {
                         ExistingPeriodicWorkPolicy.CANCEL_AND_REENQUEUE, // Replace on reboot.
                         workRequest);
 
+        Constraints wvConstraints = new Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .setRequiresBatteryNotLow(true)
+                .build();
+
         Log.i(TAG, "Queueing a one-time provisioning job for widevine provisioning.");
         OneTimeWorkRequest wvRequest = new OneTimeWorkRequest.Builder(WidevineProvisioner.class)
                 .addTag("WidevineProvisioner")
-                .setConstraints(constraints)
+                .setConstraints(wvConstraints)
                 .build();
         WorkManager.getInstance(context).enqueue(wvRequest);
     }

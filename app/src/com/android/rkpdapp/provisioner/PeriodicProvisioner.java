@@ -82,18 +82,21 @@ public class PeriodicProvisioner extends Worker {
      */
     @Override
     public Result doWork() {
-        sLock.lock();
-        try {
+        Log.i(TAG, "Waking up; waiting to check provisioning state.");
+        try (AutoCloseable lock = lock()) {
             Trace.beginSection("Periodic.Provisioner");
             return doSynchronizedWork();
+        } catch(Exception e) {
+            Log.e(TAG, "Error running PeriodicProvisioner", e);
+            return Result.failure();
         } finally {
             Trace.endSection();
-            sLock.unlock();
+            Log.i(TAG, "Provisioning complete; going back to sleep.");
         }
     }
 
     private Result doSynchronizedWork() {
-        Log.i(TAG, "Waking up; checking provisioning state.");
+        Log.i(TAG, "Checking provisioning state.");
 
         SystemInterface[] irpcs = ServiceManagerInterface.getAllInstances();
         if (irpcs.length == 0) {
@@ -138,16 +141,17 @@ public class PeriodicProvisioner extends Worker {
 
             final AtomicBoolean result = new AtomicBoolean(true);
             Arrays.stream(irpcs).parallel().forEach(irpc -> {
-                Log.i(TAG, "Starting provisioning for " + irpc);
+                String irpcName = irpc.getServiceName();
+                Log.i(TAG, "Starting provisioning for " + irpcName);
                 try {
                     provisioner.provisionKeys(metrics, irpc, response);
                     recordKeyPoolStatsAtom(irpc);
-                    Log.i(TAG, "Successfully provisioned " + irpc);
+                    Log.i(TAG, "Successfully provisioned " + irpcName);
                 } catch (CborException e) {
-                    Log.e(TAG, "Error parsing CBOR for " + irpc, e);
+                    Log.e(TAG, "Error parsing CBOR for " + irpcName, e);
                     result.set(false);
                 } catch (InterruptedException | RkpdException e) {
-                    Log.e(TAG, "Error provisioning keys for " + irpc, e);
+                    Log.e(TAG, "Error provisioning keys for " + irpcName, e);
                     result.set(false);
                 }
             });

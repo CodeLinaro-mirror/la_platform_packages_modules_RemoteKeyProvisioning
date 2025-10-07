@@ -28,6 +28,7 @@ import android.os.ServiceManager;
 import android.os.SystemProperties;
 import android.security.keystore.KeyGenParameterSpec;
 
+import android.util.Log;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.work.ListenableWorker;
 import androidx.work.testing.TestWorkerBuilder;
@@ -43,6 +44,8 @@ import com.android.rkpdapp.testutil.SystemInterfaceSelector;
 import com.android.rkpdapp.utils.Settings;
 import com.android.rkpdapp.utils.StatsProcessor;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -61,6 +64,7 @@ import java.util.concurrent.Executors;
 
 @RunWith(Parameterized.class)
 public class RkpdHostTestHelperTests {
+    private static final String TAG = "RkpdHostTestHelperTests";
     private static final String KEY_ALIAS = "RKPD_HOST_TEST_HELPER_KEY";
     private static Context sContext;
     private final String mInstanceName;
@@ -99,6 +103,11 @@ public class RkpdHostTestHelperTests {
                 .that(ServerInterface.isNetworkConnected(sContext))
                 .isTrue();
 
+        assume()
+                .withMessage("Device is not able to resolve hostnames. Check network connection.")
+                .that(isDnsResolutionSuccessful())
+                .isTrue();
+
         mPeriodicProvisionerLock = PeriodicProvisioner.lock();
         Settings.clearPreferences(sContext);
         mKeyDao = RkpdDatabase.getDatabase(sContext).provisionedKeyDao();
@@ -135,6 +144,11 @@ public class RkpdHostTestHelperTests {
 
     @Test
     public void provisionThenUseKeyThenProvision() throws Exception {
+        assume()
+                .withMessage(mInstanceName + " is not supported for this test.")
+                .that(mInstanceName)
+                .isIn(List.of("default", "strongbox"));
+
         assertThat(mProvisioner.doWork()).isEqualTo(ListenableWorker.Result.success());
 
         KeyPairGenerator generator = KeyPairGenerator.getInstance(KEY_ALGORITHM_EC,
@@ -188,5 +202,22 @@ public class RkpdHostTestHelperTests {
 
         assertThat(updatedPool.keysInUse + updatedPool.keysUnassigned)
                 .isEqualTo(pool.keysInUse + pool.keysUnassigned);
+    }
+
+    private boolean isDnsResolutionSuccessful() {
+        String hostname = SystemProperties.get("remote_provisioning.hostname");
+        try {
+            InetAddress ignored = InetAddress.getByName(hostname);
+            // If the inet address is resolving to null address, we should let
+            // it continue to test and make noise since this is an unknown
+            // failure.
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Exception encountered during test setup.", e);
+            // UnknownHostException signals the DNS resolution failure.
+            // Anything else would be unknown, and we should allow our testing
+            // to make noise in that case.
+            return !(e instanceof UnknownHostException);
+        }
     }
 }
