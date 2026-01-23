@@ -58,12 +58,8 @@ public class X509Utils {
             ByteArrayInputStream in = new ByteArrayInputStream(certStream);
             ArrayList<Certificate> certs = new ArrayList<>(fact.generateCertificates(in));
             X509Certificate[] certChain = certs.toArray(new X509Certificate[0]);
-            if (isCertChainValid(certChain)) {
-                return certChain;
-            } else {
-                throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
-                        "Could not validate certificate chain.");
-            }
+            validateCertChain(certChain);
+            return certChain;
         } catch (CertificateException | NoSuchAlgorithmException | NoSuchProviderException
                  | InvalidAlgorithmParameterException e) {
             Log.e(TAG, "Unable to parse certificate chain."
@@ -116,21 +112,22 @@ public class X509Utils {
     }
 
     /**
-     * Validates the X509 certificate chain and returns appropriate boolean result.
+     * Validates the X509 certificate chain and throws an exception if the chain is invalid.
      */
-    public static boolean isCertChainValid(X509Certificate[] certChain)
+    private static void validateCertChain(X509Certificate[] certChain)
             throws NoSuchAlgorithmException, NoSuchProviderException,
-            InvalidAlgorithmParameterException {
+            InvalidAlgorithmParameterException, RkpdException {
         if (certChain.length == 0) {
-            Log.e(TAG, "Certificate chain is empty.");
-            return false;
+            throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
+                    "Certificate chain is empty.");
         }
         X509Certificate rootCert = certChain[certChain.length - 1];
-        return isSelfSignedCertificate(rootCert) && verifyCertChain(rootCert, certChain);
+        verifySelfSignedCertificate(rootCert);
+        verifyCertChain(rootCert, certChain);
     }
 
-    private static boolean verifyCertChain(X509Certificate rootCert, X509Certificate[] certChain)
-            throws NoSuchAlgorithmException, InvalidAlgorithmParameterException {
+    private static void verifyCertChain(X509Certificate rootCert, X509Certificate[] certChain)
+            throws NoSuchAlgorithmException, InvalidAlgorithmParameterException, RkpdException {
         try {
             // Only add the self-signed root certificate as trust anchor.
             // All the other certificates in the chain should be signed by the previous cert's key.
@@ -140,25 +137,32 @@ public class X509Utils {
             CertPathValidator validator = CertPathValidator.getInstance("PKIX");
             PKIXParameters parameters = new PKIXParameters(trustedAnchors);
             parameters.setRevocationEnabled(false);
+            // To avoid issues with incorrect system time on the device, we need to pick a
+            // validation date when the certificate chain was known to be valid. The earliest
+            // time the chain could have been valid is when the last certificate in the chain
+            // became valid.
+            Date validationDate = Arrays.stream(certChain)
+                    .map(X509Certificate::getNotBefore)
+                    .max(Date::compareTo)
+                    .get();
+            parameters.setDate(validationDate);
             validator.validate(fact.generateCertPath(Arrays.asList(certChain)), parameters);
-            return true;
         } catch (CertificateException | CertPathValidatorException e) {
-            Log.e(TAG, "certificate chain validation failed.", e);
-            return false;
+            throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
+                    "Certificate chain validation failed.", e);
         }
     }
 
     /**
      * Verifies whether an X509Certificate is a self-signed certificate.
      */
-    public static boolean isSelfSignedCertificate(X509Certificate certificate)
-            throws NoSuchAlgorithmException, NoSuchProviderException {
+    private static void verifySelfSignedCertificate(X509Certificate certificate)
+            throws NoSuchAlgorithmException, NoSuchProviderException, RkpdException {
         try {
             certificate.verify(certificate.getPublicKey());
-            return true;
         } catch (SignatureException | InvalidKeyException | CertificateException e) {
-            Log.e(TAG, "Error verifying self signed certificate", e);
-            return false;
+            throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
+                    "Error verifying self signed certificate", e);
         }
     }
 

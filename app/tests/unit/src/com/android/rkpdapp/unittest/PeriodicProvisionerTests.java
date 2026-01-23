@@ -26,6 +26,7 @@ import static org.mockito.Mockito.verify;
 
 import android.content.Context;
 import android.platform.test.annotations.RequiresFlagsDisabled;
+import android.platform.test.annotations.RequiresFlagsEnabled;
 import android.platform.test.flag.junit.CheckFlagsRule;
 import android.platform.test.flag.junit.DeviceFlagsValueProvider;
 import androidx.test.core.app.ApplicationProvider;
@@ -173,8 +174,8 @@ public class PeriodicProvisionerTests {
     }
 
     @Test
-    @RequiresFlagsDisabled(Flags.FLAG_ENABLE_FEEDBACK_LOOP)
-    public void provisionSuccess() throws Exception {
+    @RequiresFlagsDisabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisionSuccess_withoutReportDeviceReset() throws Exception {
         try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
                 FakeRkpServer.Response.FETCH_EEK_OK,
                 FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
@@ -182,6 +183,25 @@ public class PeriodicProvisionerTests {
             SystemInterface mockHal = mock(SystemInterface.class);
             doReturn("test-irpc").when(mockHal).getServiceName();
             doReturn(new byte[1]).when(mockHal).generateCsr(any(), any(), any());
+            doReturn(5).when(mockHal).getBatchSize();
+            doReturn(FAKE_RKP_KEY).when(mockHal).generateKey(any());
+            doReturn("test-irpc").when(mockHal).getHalInstanceName();
+
+            ServiceManagerInterface.setInstances(new SystemInterface[]{mockHal});
+            assertThat(mProvisioner.doWork()).isEqualTo(ListenableWorker.Result.success());
+        }
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisionSuccess() throws Exception {
+        try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
+                FakeRkpServer.Response.FETCH_EEK_OK,
+                FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
+            saveUrlInSettings(fakeRkpServer);
+            SystemInterface mockHal = mock(SystemInterface.class);
+            doReturn("test-irpc").when(mockHal).getServiceName();
+            doReturn(new byte[1]).when(mockHal).generateCsr(any(), any(), any(), any());
             doReturn(5).when(mockHal).getBatchSize();
             doReturn(FAKE_RKP_KEY).when(mockHal).generateKey(any());
             doReturn("test-irpc").when(mockHal).getHalInstanceName();
@@ -232,7 +252,39 @@ public class PeriodicProvisionerTests {
     }
 
     @Test
-    @RequiresFlagsDisabled(Flags.FLAG_ENABLE_FEEDBACK_LOOP)
+    @RequiresFlagsDisabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisioningExpiresOldKeys_withoutReportDeviceReset() throws Exception {
+        ProvisionedKeyDao dao = RkpdDatabase.getDatabase(sContext).provisionedKeyDao();
+        ProvisionedKey oldKey = new ProvisionedKey(new byte[1], "test-irpc", new byte[2],
+                new byte[3],
+                Instant.now().minus(RegistrationBinder.MIN_KEY_LIFETIME.multipliedBy(2)));
+        // Add 2 hours so that this key does not get deleted in case getKeyWorker comes alive.
+        ProvisionedKey freshKey = new ProvisionedKey(new byte[11], "test-irpc", new byte[12],
+                new byte[13],
+                Instant.now().plus(RegistrationBinder.MIN_KEY_LIFETIME.multipliedBy(2)));
+        dao.insertKeys(List.of(oldKey, freshKey));
+        assertThat(dao.getTotalKeysForIrpc("test-irpc")).isEqualTo(2);
+
+        try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
+                FakeRkpServer.Response.FETCH_EEK_OK,
+                FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
+            saveUrlInSettings(fakeRkpServer);
+            SystemInterface mockHal = mock(SystemInterface.class);
+            doReturn("test-irpc").when(mockHal).getServiceName();
+            doReturn(new byte[1]).when(mockHal).generateCsr(any(), any(), any());
+            doReturn(20).when(mockHal).getBatchSize();
+            doReturn(FAKE_RKP_KEY).when(mockHal).generateKey(any());
+            doReturn("test-irpc").when(mockHal).getHalInstanceName();
+            ServiceManagerInterface.setInstances(new SystemInterface[]{mockHal});
+            assertThat(mProvisioner.doWork()).isEqualTo(ListenableWorker.Result.success());
+        }
+
+        // old key should be gone, fresh key hangs around
+        assertThat(dao.getTotalKeysForIrpc("test-irpc")).isEqualTo(1);
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_REPORT_DEVICE_RESET)
     public void provisioningExpiresOldKeys() throws Exception {
         ProvisionedKeyDao dao = RkpdDatabase.getDatabase(sContext).provisionedKeyDao();
         ProvisionedKey oldKey = new ProvisionedKey(new byte[1], "test-irpc", new byte[2],
@@ -288,7 +340,8 @@ public class PeriodicProvisionerTests {
     }
 
     @Test
-    public void provisionTwoHalsFirstFails() throws Exception {
+    @RequiresFlagsDisabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisionTwoHalsFirstFails_reportDeviceResetDisabled() throws Exception {
         try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
                 FakeRkpServer.Response.FETCH_EEK_OK,
                 FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
@@ -313,7 +366,34 @@ public class PeriodicProvisionerTests {
     }
 
     @Test
-    public void provisionTwoHalsSecondFails() throws Exception {
+    @RequiresFlagsEnabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisionTwoHalsFirstFails_reportDeviceResetEnabled() throws Exception {
+        try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
+                FakeRkpServer.Response.FETCH_EEK_OK,
+                FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
+            saveUrlInSettings(fakeRkpServer);
+            SystemInterface firstHal = mock(SystemInterface.class);
+            doReturn("first").when(firstHal).getServiceName();
+            doReturn(20).when(firstHal).getBatchSize();
+            doThrow(new CborException("first hal failed")).when(firstHal).generateKey(any());
+
+            SystemInterface secondHal = mock(SystemInterface.class);
+            doReturn("second").when(secondHal).getServiceName();
+            doReturn(20).when(secondHal).getBatchSize();
+            doReturn(FAKE_RKP_KEY).when(secondHal).generateKey(any());
+            doReturn(new byte[3]).when(secondHal).generateCsr(any(), any(), any(), any());
+
+            ServiceManagerInterface.setInstances(new SystemInterface[]{firstHal, secondHal});
+            assertThat(mProvisioner.doWork()).isEqualTo(ListenableWorker.Result.failure());
+
+            verify(firstHal, never()).generateCsr(any(), any(), any(), any());
+            verify(secondHal).generateCsr(any(), any(), any(), any());
+        }
+    }
+
+    @Test
+    @RequiresFlagsDisabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisionTwoHalsSecondFails_reportDeviceResetDisabled() throws Exception {
         try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
                 FakeRkpServer.Response.FETCH_EEK_OK,
                 FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
@@ -334,6 +414,32 @@ public class PeriodicProvisionerTests {
 
             verify(firstHal).generateCsr(any(), any(), any());
             verify(secondHal, never()).generateCsr(any(), any(), any());
+        }
+    }
+
+    @Test
+    @RequiresFlagsEnabled(Flags.FLAG_REPORT_DEVICE_RESET)
+    public void provisionTwoHalsSecondFails_reportDeviceResetEnabled() throws Exception {
+        try (FakeRkpServer fakeRkpServer = new FakeRkpServer(
+                FakeRkpServer.Response.FETCH_EEK_OK,
+                FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
+            saveUrlInSettings(fakeRkpServer);
+            SystemInterface firstHal = mock(SystemInterface.class);
+            doReturn("first").when(firstHal).getServiceName();
+            doReturn(20).when(firstHal).getBatchSize();
+            doReturn(FAKE_RKP_KEY).when(firstHal).generateKey(any());
+            doReturn(new byte[42]).when(firstHal).generateCsr(any(), any(), any(), any());
+
+            SystemInterface secondHal = mock(SystemInterface.class);
+            doReturn("second").when(secondHal).getServiceName();
+            doReturn(20).when(secondHal).getBatchSize();
+            doThrow(new CborException("second hal failed")).when(secondHal).generateKey(any());
+
+            ServiceManagerInterface.setInstances(new SystemInterface[]{firstHal, secondHal});
+            assertThat(mProvisioner.doWork()).isEqualTo(ListenableWorker.Result.failure());
+
+            verify(firstHal).generateCsr(any(), any(), any(), any());
+            verify(secondHal, never()).generateCsr(any(), any(), any(), any());
         }
     }
 
