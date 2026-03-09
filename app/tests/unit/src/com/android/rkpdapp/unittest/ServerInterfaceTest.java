@@ -200,6 +200,29 @@ public class ServerInterfaceTest {
     }
 
     @Test
+    public void testFetchGeekNullResponseResetsConfig() throws Exception {
+        // Use a response that is not valid CBOR for a GEEK response, which will cause
+        // GeekResponse.parse to return null.
+        try (FakeRkpServer server =
+                new FakeRkpServer(
+                        FakeRkpServer.Response.SIGN_CERTS_OK_INVALID_CBOR,
+                        FakeRkpServer.Response.INTERNAL_ERROR)) {
+            final String badUrl = server.getUrl();
+            Settings.setDeviceConfig(sContext, 1, TIME_TO_REFRESH_HOURS, badUrl);
+            assertThat(Settings.getUrl(sContext)).isEqualTo(badUrl);
+
+            ProvisioningAttempt metrics =
+                    ProvisioningAttempt.createScheduledAttemptMetrics(sContext);
+            RkpdException e =
+                    assertThrows(RkpdException.class, () -> mServerInterface.fetchGeek(metrics));
+
+            assertThat(e.getErrorCode()).isEqualTo(RkpdException.ErrorCode.HTTP_SERVER_ERROR);
+            assertThat(e).hasMessageThat().contains("Response failed to parse.");
+            assertThat(Settings.getUrl(sContext)).isEqualTo(Settings.getDefaultUrl());
+        }
+    }
+
+    @Test
     public void testRequestSignedCertUnregistered() throws Exception {
         try (FakeRkpServer server = new FakeRkpServer(
                 FakeRkpServer.Response.FETCH_EEK_OK,
@@ -653,5 +676,65 @@ public class ServerInterfaceTest {
         String expectedReason = (longMessage + ": " + longCauseMessage).substring(0, 256);
         assertThat(reason.getString()).isEqualTo(expectedReason);
         assertThat(reason.getString().length()).isEqualTo(256);
+    }
+
+    @Test
+    public void malformedUrlResetsConfig() throws Exception {
+        Settings.setMaxRequestTime(sContext, 100);
+        assertThat(Settings.getUrl(sContext)).isEqualTo(Settings.getDefaultUrl());
+        final String badUrl = "bad url";
+
+        // Override the default config.
+        Settings.setDeviceConfig(sContext, 1 /* extraKeys */,
+                TIME_TO_REFRESH_HOURS /* expiringBy */, badUrl);
+        assertThat(Settings.getUrl(sContext)).isEqualTo(badUrl);
+
+        ProvisioningAttempt metrics =
+                ProvisioningAttempt.createScheduledAttemptMetrics(sContext);
+        RkpdException e =
+                assertThrows(
+                        RkpdException.class, () -> mServerInterface.fetchGeek(metrics));
+
+        assertThat(e.getErrorCode()).isEqualTo(RkpdException.ErrorCode.HTTP_CLIENT_ERROR);
+        assertThat(e).hasMessageThat().contains("Bad URL");
+
+        // Verify that the config is reset to the default.
+        assertThat(Settings.getUrl(sContext)).isEqualTo(Settings.getDefaultUrl());
+    }
+
+    @Test
+    public void httpClientErrorResetsConfigAfterMaxFailures() throws Exception {
+        // Default config.
+        Settings.setMaxRequestTime(sContext, 100);
+        assertThat(Settings.getUrl(sContext)).isEqualTo(Settings.getDefaultUrl());
+
+        // Override the default config with a URL that will return a 404.
+        final String badUrl = "http://google.com/validUrlNonExistentPath";
+        Settings.setDeviceConfig(sContext, 1, TIME_TO_REFRESH_HOURS, badUrl);
+        assertThat(Settings.getUrl(sContext)).isEqualTo(badUrl);
+
+        try (
+            // These endpoints will not be called, but must be provided.
+            FakeRkpServer server =
+                new FakeRkpServer(
+                        FakeRkpServer.Response.FETCH_EEK_OK,
+                        FakeRkpServer.Response.SIGN_CERTS_OK_VALID_CBOR)) {
+            ProvisioningAttempt metrics =
+                    ProvisioningAttempt.createScheduledAttemptMetrics(sContext);
+
+            // First failure should not reset the config.
+            assertThrows(RkpdException.class, () -> mServerInterface.fetchGeek(metrics));
+            assertThat(Settings.getUrl(sContext)).isEqualTo(badUrl);
+
+            // Simulate a number of failures to reach the maximum.
+            for (int i = 0; i < Settings.FAILURE_MAXIMUM-1; ++i) {
+                Settings.incrementFailureCounter(sContext);
+            }
+
+            // The next request should reset the config.
+            assertThrows(RkpdException.class, () -> mServerInterface.fetchGeek(metrics));
+            assertThat(Settings.getUrl(sContext)).isEqualTo(Settings.getDefaultUrl());
+            assertThat(Settings.getFailureCounter(sContext)).isEqualTo(0);
+        }
     }
 }

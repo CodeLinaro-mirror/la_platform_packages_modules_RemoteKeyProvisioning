@@ -336,21 +336,24 @@ public class ServerInterface {
         Log.i(TAG, "request_id: " + requestId);
 
         byte[] input = CborUtils.buildProvisioningInfo(mContext);
+        URL url = generateUrl(Operation.FETCH_GEEK, requestId);
         byte[] cborBytes =
                 connectAndGetData(
                         metrics,
-                        generateUrl(Operation.FETCH_GEEK, requestId),
+                        url,
                         input,
                         Operation.FETCH_GEEK);
         GeekResponse resp = GeekResponse.parse(cborBytes);
-        if (Flags.enableRequestIdReuse()) {
-            resp.setRequestId(requestId);
-        }
+        // Response successfully received from the server but failed to parse.
         if (resp == null) {
             metrics.setStatus(ProvisioningAttempt.Status.FETCH_GEEK_HTTP_ERROR);
+            Settings.resetDefaultConfig(mContext);
             throw new RkpdException(
                     RkpdException.ErrorCode.HTTP_SERVER_ERROR,
                     "Response failed to parse.");
+        }
+        if (Flags.enableRequestIdReuse()) {
+            resp.setRequestId(requestId);
         }
         return resp;
     }
@@ -375,6 +378,7 @@ public class ServerInterface {
                             // Not really needed, but just in case.
                             .replaceFirst("%3A", ":"));
         } catch (MalformedURLException e) {
+            Settings.resetDefaultConfig(mContext);
             throw new RkpdException(RkpdException.ErrorCode.HTTP_CLIENT_ERROR, "Bad URL", e);
         }
     }
