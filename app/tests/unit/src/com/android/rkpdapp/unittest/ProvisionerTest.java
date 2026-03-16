@@ -282,7 +282,8 @@ public class ProvisionerTest {
     }
 
     @Test
-    @RequiresFlagsEnabled(Flags.FLAG_ENABLE_FEEDBACK_LOOP)
+    @RequiresFlagsEnabled(
+            value = {Flags.FLAG_ENABLE_FEEDBACK_LOOP, Flags.FLAG_ENABLE_REQUEST_ID_REUSE})
     @RequiresFlagsDisabled(Flags.FLAG_REPORT_DEVICE_RESET)
     public void testProvisionerReusesRequestIdFromGeekResponse_withoutDeviceResetFlag() throws Exception {
         // This is how the server would encode the response. The shared chain is the root,
@@ -338,7 +339,7 @@ public class ProvisionerTest {
 
     @Test
     @RequiresFlagsEnabled(
-            value = {Flags.FLAG_ENABLE_FEEDBACK_LOOP, Flags.FLAG_REPORT_DEVICE_RESET})
+            value = {Flags.FLAG_ENABLE_FEEDBACK_LOOP, Flags.FLAG_ENABLE_REQUEST_ID_REUSE, Flags.FLAG_REPORT_DEVICE_RESET})
     public void testProvisionerReusesRequestIdFromGeekResponse() throws Exception {
         // This is how the server would encode the response. The shared chain is the root,
         // and the unique chains are the leaf certs.
@@ -498,7 +499,7 @@ public class ProvisionerTest {
 
     @Test
     @RequiresFlagsEnabled(
-            value = {Flags.FLAG_ENABLE_FEEDBACK_LOOP, Flags.FLAG_REPORT_DEVICE_RESET})
+            value = {Flags.FLAG_ENABLE_FEEDBACK_LOOP, Flags.FLAG_ENABLE_REQUEST_ID_REUSE, Flags.FLAG_REPORT_DEVICE_RESET})
     public void testProvisionerSuccessfulProvisioningTriggersConfirmCertificates()
             throws Exception {
         try (FakeRkpServer server =
@@ -540,7 +541,8 @@ public class ProvisionerTest {
     }
 
     @Test
-    @RequiresFlagsEnabled(Flags.FLAG_ENABLE_FEEDBACK_LOOP)
+    @RequiresFlagsEnabled(
+            value = {Flags.FLAG_ENABLE_FEEDBACK_LOOP, Flags.FLAG_ENABLE_REQUEST_ID_REUSE})
     @RequiresFlagsDisabled(Flags.FLAG_REPORT_DEVICE_RESET)
     public void testProvisionerSuccessfulProvisioningTriggersConfirmCertificates_withoutDeviceResetFlag()
             throws Exception {

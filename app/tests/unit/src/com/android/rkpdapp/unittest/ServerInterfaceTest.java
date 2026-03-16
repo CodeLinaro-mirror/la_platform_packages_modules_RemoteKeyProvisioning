@@ -157,6 +157,7 @@ public class ServerInterfaceTest {
     }
 
     @Test
+    @RequiresFlagsEnabled(Flags.FLAG_ENABLE_REQUEST_ID_REUSE)
     public void testFetchGeekIncludesRequestId() throws Exception {
         try (FakeRkpServer server =
                 new FakeRkpServer(
@@ -231,7 +232,7 @@ public class ServerInterfaceTest {
             ProvisioningAttempt metrics = ProvisioningAttempt.createScheduledAttemptMetrics(
                     sContext);
             mServerInterface.requestSignedCertificates(new byte[0], metrics,
-                    "requestId", Optional.empty());
+                    Optional.empty(), Optional.empty());
             assertWithMessage("Should fail due to unregistered device.").fail();
         } catch (RkpdException e) {
             assertThat(e.getErrorCode()).isEqualTo(RkpdException.ErrorCode.DEVICE_NOT_REGISTERED);
@@ -249,7 +250,7 @@ public class ServerInterfaceTest {
             ProvisioningAttempt metrics = ProvisioningAttempt.createScheduledAttemptMetrics(
                     sContext);
             mServerInterface.requestSignedCertificates(new byte[0], metrics,
-                    "requestId", Optional.empty());
+                    Optional.empty(), Optional.empty());
             assertWithMessage("Should fail due to client error.").fail();
         } catch (RkpdException e) {
             assertThat(e.getErrorCode()).isEqualTo(RkpdException.ErrorCode.HTTP_CLIENT_ERROR);
@@ -280,7 +281,7 @@ public class ServerInterfaceTest {
                                 mServerInterface.requestSignedCertificates(
                                         new byte[0],
                                         metrics,
-                                        "requestId",
+                                        Optional.of("requestId"),
                                         Optional.of(mockSystem)));
 
         assertThat(ex.getErrorCode()).isEqualTo(RkpdException.ErrorCode.INTERNAL_ERROR);
@@ -300,7 +301,7 @@ public class ServerInterfaceTest {
             ProvisioningAttempt metrics = ProvisioningAttempt.createScheduledAttemptMetrics(
                     sContext);
             List<byte[]> certChains = mServerInterface.requestSignedCertificates(new byte[0],
-                    metrics, "requestId", Optional.empty());
+                    metrics, Optional.empty(), Optional.empty());
             assertThat(certChains).isEmpty();
             assertThat(certChains).isNotNull();
         }
@@ -467,11 +468,11 @@ public class ServerInterfaceTest {
         ServerInterface serverInterface = Mockito.spy(mServerInterface);
         Mockito.when(serverInterface.getRegionalProperty()).thenReturn("cn");
         assertThat(serverInterface.getConnectTimeoutMs()).isEqualTo(
-                ServerInterface.SYNC_CONNECT_TIMEOUT_RESTRICTED_MS);
+                ServerInterface.SYNC_CONNECT_TIMEOUT_RETRICTED_MS);
 
         Mockito.when(serverInterface.getRegionalProperty()).thenReturn("cn,us");
         assertThat(serverInterface.getConnectTimeoutMs()).isEqualTo(
-                ServerInterface.SYNC_CONNECT_TIMEOUT_RESTRICTED_MS);
+                ServerInterface.SYNC_CONNECT_TIMEOUT_RETRICTED_MS);
 
         Mockito.when(serverInterface.getRegionalProperty()).thenReturn(null);
         assertThat(serverInterface.getConnectTimeoutMs()).isEqualTo(
