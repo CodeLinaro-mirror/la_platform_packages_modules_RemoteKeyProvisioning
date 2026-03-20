@@ -93,55 +93,35 @@ public class Provisioner {
      */
     public void provisionKeys(ProvisioningAttempt metrics, SystemInterface systemInterface,
             GeekResponse geekResponse) throws CborException, RkpdException, InterruptedException {
-        try {
-            List<ProvisionedKey> keys;
-            List<byte[]> certChains;
-            synchronized (provisionKeysLock) {
-                int keysRequired = calculateKeysRequired(metrics, systemInterface.getServiceName());
-                Log.i(TAG, "Requested number of keys for provisioning: " + keysRequired);
-                if (keysRequired == 0) {
-                    metrics.setStatus(ProvisioningAttempt.Status.NO_PROVISIONING_NEEDED);
-                    return;
-                }
-
-                List<RkpKey> keysGenerated = generateKeys(metrics, keysRequired, systemInterface);
-                checkForInterrupts();
-                certChains = fetchCertificates(metrics, keysGenerated, systemInterface,
-                        geekResponse);
-                checkForInterrupts();
-                keys =
-                        associateCertsWithKeys(
-                                certChains,
-                                keysGenerated,
-                                systemInterface,
-                                geekResponse.requestId,
-                                metrics);
-
-                mKeyDao.insertKeys(keys);
+        synchronized (provisionKeysLock) {
+            int keysRequired = calculateKeysRequired(metrics, systemInterface.getServiceName());
+            Log.i(TAG, "Requested number of keys for provisioning: " + keysRequired);
+            if (keysRequired == 0) {
+                metrics.setStatus(ProvisioningAttempt.Status.NO_PROVISIONING_NEEDED);
+                return;
             }
 
-            if (systemInterface.getHalInstanceName().equals("default")
-                    || systemInterface.getHalInstanceName().equals("strongbox")) {
-                generateAttestationCertificate(
-                        certChains,
-                        keys,
-                        geekResponse.requestId,
-                        metrics,
-                        systemInterface);
-            }
+            List<RkpKey> keysGenerated = generateKeys(metrics, keysRequired, systemInterface);
+            checkForInterrupts();
+            List<byte[]> certChains = fetchCertificates(metrics, keysGenerated, systemInterface,
+                    geekResponse);
+            checkForInterrupts();
+            List<ProvisionedKey> keys =
+                    associateCertsWithKeys(certChains, keysGenerated, systemInterface,
+                            geekResponse.requestId, metrics);
 
+            mKeyDao.insertKeys(keys);
+            generateAttestationCertificate(certChains, keys, geekResponse.requestId, metrics,
+                    systemInterface);
             Log.i(TAG, "Total provisioned keys: " + keys.size());
-            metrics.setStatus(ProvisioningAttempt.Status.KEYS_SUCCESSFULLY_PROVISIONED);
-            new ServerInterface(mContext, mIsAsync)
-                    .confirmCertificates(
-                            ConfirmCertificates.createSuccess(
-                                    systemInterface.getHalInstanceName()),
-                            geekResponse.requestId,
-                            metrics);
-        } catch (InterruptedException e) {
-            metrics.setStatus(ProvisioningAttempt.Status.INTERRUPTED);
-            throw e;
         }
+
+        metrics.setStatus(ProvisioningAttempt.Status.KEYS_SUCCESSFULLY_PROVISIONED);
+        new ServerInterface(mContext, mIsAsync)
+            .confirmCertificates(
+                ConfirmCertificates.createSuccess(systemInterface.getHalInstanceName()),
+                geekResponse.requestId,
+                metrics);
     }
 
     private void generateAttestationCertificate(
@@ -149,6 +129,10 @@ public class Provisioner {
             ProvisioningAttempt metrics, SystemInterface systemInterface)
             throws RkpdException, InterruptedException {
         if (!Flags.enableFeedbackLoop()) {
+            return;
+        }
+        if (!systemInterface.getHalInstanceName().equals("default")
+                && !systemInterface.getHalInstanceName().equals("strongbox")) {
             return;
         }
 

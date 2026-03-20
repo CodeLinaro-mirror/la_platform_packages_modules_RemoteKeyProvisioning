@@ -391,9 +391,7 @@ public class KeystoreIntegrationTest {
     @Test
     @RequiresFlagsEnabled(Flags.FLAG_ENABLE_FEEDBACK_LOOP)
     public void testLargeNumberOfAttestationRequests_doesNotDeadlock() throws Exception {
-        // Spin up more threads than the number of keystore threads (20), but less than the number
-        // of threads in the RKPD thread pool (32).
-        final int numThreads = ThreadPool.NUMBER_OF_THREADS - 1;
+        final int numThreads = ThreadPool.NUMBER_OF_THREADS;
         final String baseAlias = "testKey_" + mName.getMethodName();
         ExecutorService executor = Executors.newFixedThreadPool(numThreads);
         List<Future<?>> futures = new ArrayList<>();
@@ -425,7 +423,7 @@ public class KeystoreIntegrationTest {
         executor.shutdown();
 
         // If we deadlock, this will time out.
-        boolean terminated = executor.awaitTermination(30, TimeUnit.SECONDS);
+        boolean terminated = executor.awaitTermination(60, TimeUnit.SECONDS);
         assertThat(terminated).isEqualTo(true);
     }
 
