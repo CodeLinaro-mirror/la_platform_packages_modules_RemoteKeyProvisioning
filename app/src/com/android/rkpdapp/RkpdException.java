@@ -31,7 +31,6 @@ public final class RkpdException extends Exception {
         HTTP_SERVER_ERROR,
         HTTP_UNKNOWN_ERROR,
         INTERNAL_ERROR,
-        TRANSIENT_ERROR,
     }
 
     private final ErrorCode mErrorCode;
