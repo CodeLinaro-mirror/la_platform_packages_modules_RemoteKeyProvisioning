@@ -44,6 +44,7 @@ import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
+import java.security.ProviderException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
@@ -157,6 +158,12 @@ public class Provisioner {
                     keystore, keyAlias, systemInterface.getHalInstanceName());
             rawPublicKey = getRkpRawPublicKeyFromAttestationCertChain(attestationCertChain);
         } catch (Exception e) {
+            if (e instanceof RkpdException && ((RkpdException) e).getErrorCode() ==
+                    RkpdException.ErrorCode.TRANSIENT_ERROR) {
+                Log.i(TAG, "Transient error generating attestation certificate. Skipping "
+                        + "certificate confirmation for now.", e);
+                return;
+            }
             Log.e(TAG, "Error generating attestation certificate. Reporting to the server"
                     + " and deleting provisioned keys from this batch.", e);
             mKeyDao.deleteKeys(keys);
@@ -200,6 +207,15 @@ public class Provisioner {
         } catch (
             KeyStoreException | InvalidAlgorithmParameterException |
             NoSuchAlgorithmException | NoSuchProviderException e) {
+            throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
+                    "Error generating attestation certificate", e);
+        } catch (ProviderException e) {
+            if (e.getCause() instanceof android.security.KeyStoreException kse) {
+                if (kse.isTransientFailure()) {
+                    throw new RkpdException(RkpdException.ErrorCode.TRANSIENT_ERROR,
+                            "Transient keystore error generating attestation certificate", e);
+                }
+            }
             throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
                     "Error generating attestation certificate", e);
         }
