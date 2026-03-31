@@ -93,8 +93,10 @@ public class Provisioner {
      */
     public void provisionKeys(ProvisioningAttempt metrics, SystemInterface systemInterface,
             GeekResponse geekResponse) throws CborException, RkpdException, InterruptedException {
-        synchronized (provisionKeysLock) {
-            try {
+        try {
+            List<ProvisionedKey> keys;
+            List<byte[]> certChains;
+            synchronized (provisionKeysLock) {
                 int keysRequired = calculateKeysRequired(metrics, systemInterface.getServiceName());
                 Log.i(TAG, "Requested number of keys for provisioning: " + keysRequired);
                 if (keysRequired == 0) {
@@ -104,10 +106,10 @@ public class Provisioner {
 
                 List<RkpKey> keysGenerated = generateKeys(metrics, keysRequired, systemInterface);
                 checkForInterrupts();
-                List<byte[]> certChains = fetchCertificates(metrics, keysGenerated, systemInterface,
+                certChains = fetchCertificates(metrics, keysGenerated, systemInterface,
                         geekResponse);
                 checkForInterrupts();
-                List<ProvisionedKey> keys =
+                keys =
                         associateCertsWithKeys(
                                 certChains,
                                 keysGenerated,
@@ -116,27 +118,29 @@ public class Provisioner {
                                 metrics);
 
                 mKeyDao.insertKeys(keys);
-                if (systemInterface.getHalInstanceName().equals("default")
-                        || systemInterface.getHalInstanceName().equals("strongbox")) {
+            }
+
+            if (systemInterface.getHalInstanceName().equals("default")
+                    || systemInterface.getHalInstanceName().equals("strongbox")) {
                 generateAttestationCertificate(
                         certChains,
                         keys,
                         geekResponse.requestId,
                         metrics,
                         systemInterface);
-                }
-                Log.i(TAG, "Total provisioned keys: " + keys.size());
-                metrics.setStatus(ProvisioningAttempt.Status.KEYS_SUCCESSFULLY_PROVISIONED);
-                new ServerInterface(mContext, mIsAsync)
-                        .confirmCertificates(
-                                ConfirmCertificates.createSuccess(
-                                        systemInterface.getHalInstanceName()),
-                                geekResponse.requestId,
-                                metrics);
-            } catch (InterruptedException e) {
-                metrics.setStatus(ProvisioningAttempt.Status.INTERRUPTED);
-                throw e;
             }
+
+            Log.i(TAG, "Total provisioned keys: " + keys.size());
+            metrics.setStatus(ProvisioningAttempt.Status.KEYS_SUCCESSFULLY_PROVISIONED);
+            new ServerInterface(mContext, mIsAsync)
+                    .confirmCertificates(
+                            ConfirmCertificates.createSuccess(
+                                    systemInterface.getHalInstanceName()),
+                            geekResponse.requestId,
+                            metrics);
+        } catch (InterruptedException e) {
+            metrics.setStatus(ProvisioningAttempt.Status.INTERRUPTED);
+            throw e;
         }
     }
 
@@ -223,6 +227,10 @@ public class Provisioner {
      */
     private byte[] getRkpRawPublicKeyFromAttestationCertChain(Certificate[] attestationCertChain)
             throws RkpdException {
+        if (attestationCertChain == null) {
+            throw new RkpdException(
+                RkpdException.ErrorCode.INTERNAL_ERROR, "Attestation certificate chain is null");
+        }
         X509Certificate[] x509Certificates = Arrays.stream(attestationCertChain)
                 .map(x -> (X509Certificate) x)
                 .toList()
