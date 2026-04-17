@@ -94,50 +94,34 @@ public class Provisioner {
     public void provisionKeys(ProvisioningAttempt metrics, SystemInterface systemInterface,
             GeekResponse geekResponse) throws CborException, RkpdException, InterruptedException {
         synchronized (provisionKeysLock) {
-            try {
-                int keysRequired = calculateKeysRequired(metrics, systemInterface.getServiceName());
-                Log.i(TAG, "Requested number of keys for provisioning: " + keysRequired);
-                if (keysRequired == 0) {
-                    metrics.setStatus(ProvisioningAttempt.Status.NO_PROVISIONING_NEEDED);
-                    return;
-                }
-
-                List<RkpKey> keysGenerated = generateKeys(metrics, keysRequired, systemInterface);
-                checkForInterrupts();
-                List<byte[]> certChains = fetchCertificates(metrics, keysGenerated, systemInterface,
-                        geekResponse);
-                checkForInterrupts();
-                List<ProvisionedKey> keys =
-                        associateCertsWithKeys(
-                                certChains,
-                                keysGenerated,
-                                systemInterface,
-                                geekResponse.requestId,
-                                metrics);
-
-                mKeyDao.insertKeys(keys);
-                if (systemInterface.getHalInstanceName().equals("default")
-                        || systemInterface.getHalInstanceName().equals("strongbox")) {
-                generateAttestationCertificate(
-                        certChains,
-                        keys,
-                        geekResponse.requestId,
-                        metrics,
-                        systemInterface);
-                }
-                Log.i(TAG, "Total provisioned keys: " + keys.size());
-                metrics.setStatus(ProvisioningAttempt.Status.KEYS_SUCCESSFULLY_PROVISIONED);
-                new ServerInterface(mContext, mIsAsync)
-                        .confirmCertificates(
-                                ConfirmCertificates.createSuccess(
-                                        systemInterface.getHalInstanceName()),
-                                geekResponse.requestId,
-                                metrics);
-            } catch (InterruptedException e) {
-                metrics.setStatus(ProvisioningAttempt.Status.INTERRUPTED);
-                throw e;
+            int keysRequired = calculateKeysRequired(metrics, systemInterface.getServiceName());
+            Log.i(TAG, "Requested number of keys for provisioning: " + keysRequired);
+            if (keysRequired == 0) {
+                metrics.setStatus(ProvisioningAttempt.Status.NO_PROVISIONING_NEEDED);
+                return;
             }
+
+            List<RkpKey> keysGenerated = generateKeys(metrics, keysRequired, systemInterface);
+            checkForInterrupts();
+            List<byte[]> certChains = fetchCertificates(metrics, keysGenerated, systemInterface,
+                    geekResponse);
+            checkForInterrupts();
+            List<ProvisionedKey> keys =
+                    associateCertsWithKeys(certChains, keysGenerated, systemInterface,
+                            geekResponse.requestId, metrics);
+
+            mKeyDao.insertKeys(keys);
+            generateAttestationCertificate(certChains, keys, geekResponse.requestId, metrics,
+                    systemInterface);
+            Log.i(TAG, "Total provisioned keys: " + keys.size());
         }
+
+        metrics.setStatus(ProvisioningAttempt.Status.KEYS_SUCCESSFULLY_PROVISIONED);
+        new ServerInterface(mContext, mIsAsync)
+            .confirmCertificates(
+                ConfirmCertificates.createSuccess(systemInterface.getHalInstanceName()),
+                geekResponse.requestId,
+                metrics);
     }
 
     private void generateAttestationCertificate(
@@ -145,6 +129,10 @@ public class Provisioner {
             ProvisioningAttempt metrics, SystemInterface systemInterface)
             throws RkpdException, InterruptedException {
         if (!Flags.enableFeedbackLoop()) {
+            return;
+        }
+        if (!systemInterface.getHalInstanceName().equals("default")
+                && !systemInterface.getHalInstanceName().equals("strongbox")) {
             return;
         }
 
@@ -223,6 +211,10 @@ public class Provisioner {
      */
     private byte[] getRkpRawPublicKeyFromAttestationCertChain(Certificate[] attestationCertChain)
             throws RkpdException {
+        if (attestationCertChain == null) {
+            throw new RkpdException(
+                RkpdException.ErrorCode.INTERNAL_ERROR, "Attestation certificate chain is null");
+        }
         X509Certificate[] x509Certificates = Arrays.stream(attestationCertChain)
                 .map(x -> (X509Certificate) x)
                 .toList()
@@ -288,21 +280,14 @@ public class Provisioner {
                     "Failed to serialize payload");
         }
 
-        if (Flags.enableFeedbackLoop()) {
-            Optional<String> requestId =
-                    Flags.enableRequestIdReuse()
-                            ? Optional.of(response.requestId)
-                            : Optional.empty();
-            return new ServerInterface(mContext, mIsAsync)
-                    .requestSignedCertificates(
-                            certRequest, metrics, requestId, Optional.of(systemInterface));
-        }
-
-        return Flags.enableRequestIdReuse()
-                ? new ServerInterface(mContext, mIsAsync)
-                        .requestSignedCertificates(certRequest, metrics, response.requestId)
-                : new ServerInterface(mContext, mIsAsync)
-                        .requestSignedCertificates(certRequest, metrics);
+        Optional<SystemInterface> systemInterfaceOptional =
+                Flags.enableFeedbackLoop() ? Optional.of(systemInterface) : Optional.empty();
+        return new ServerInterface(mContext, mIsAsync)
+                .requestSignedCertificates(
+                        certRequest,
+                        metrics,
+                        response.requestId,
+                        systemInterfaceOptional);
     }
 
     private List<ProvisionedKey> associateCertsWithKeys(
