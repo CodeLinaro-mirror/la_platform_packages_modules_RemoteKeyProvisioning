@@ -44,6 +44,7 @@ import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.security.NoSuchProviderException;
+import java.security.ProviderException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
@@ -157,16 +158,29 @@ public class Provisioner {
                     keystore, keyAlias, systemInterface.getHalInstanceName());
             rawPublicKey = getRkpRawPublicKeyFromAttestationCertChain(attestationCertChain);
         } catch (Exception e) {
+            if (e instanceof RkpdException rkpdException && rkpdException.getErrorCode() ==
+                    RkpdException.ErrorCode.TRANSIENT_ERROR) {
+                new ServerInterface(mContext, mIsAsync)
+                    .confirmCertificatesWithException(
+                            Optional.of(systemInterface),
+                            e,
+                            new DerCertificateChains(certChains),
+                            requestId,
+                            metrics,
+                            ConfirmCertificates.Status.WARNING);
+                return;
+            }
             Log.e(TAG, "Error generating attestation certificate. Reporting to the server"
                     + " and deleting provisioned keys from this batch.", e);
             mKeyDao.deleteKeys(keys);
             new ServerInterface(mContext, mIsAsync)
-                .confirmCertificatesError(
+                .confirmCertificatesWithException(
                         Optional.of(systemInterface),
                         e,
                         new DerCertificateChains(certChains),
                         requestId,
-                        metrics);
+                        metrics,
+                        ConfirmCertificates.Status.ERROR);
             throw e;
         }
         // Successfully generated attestation certificate, unassign and make available for reuse.
@@ -200,6 +214,15 @@ public class Provisioner {
         } catch (
             KeyStoreException | InvalidAlgorithmParameterException |
             NoSuchAlgorithmException | NoSuchProviderException e) {
+            throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
+                    "Error generating attestation certificate", e);
+        } catch (ProviderException e) {
+            if (e.getCause() instanceof android.security.KeyStoreException kse) {
+                if (kse.isTransientFailure()) {
+                    throw new RkpdException(RkpdException.ErrorCode.TRANSIENT_ERROR,
+                            "Transient keystore error generating attestation certificate", e);
+                }
+            }
             throw new RkpdException(RkpdException.ErrorCode.INTERNAL_ERROR,
                     "Error generating attestation certificate", e);
         }
@@ -304,12 +327,13 @@ public class Provisioner {
                 certChain = X509Utils.formatX509Certs(chain);
             } catch (Exception e) {
                 new ServerInterface(mContext, mIsAsync)
-                        .confirmCertificatesError(
+                        .confirmCertificatesWithException(
                                 Optional.of(systemInterface),
                                 e,
                                 new DerCertificateChains(chain),
                                 requestId,
-                                metrics);
+                                metrics,
+                                ConfirmCertificates.Status.ERROR);
                 throw e;
             }
             X509Certificate leafCertificate = certChain[0];
